@@ -1,7 +1,3 @@
-Of course. Here is a README for your script.
-
------
-
 # Databricks vs. CSV Impression Discrepancy Reporter
 
 This is an interactive reporting tool designed to run in a Databricks notebook. It compares impression data from a Databricks database against impression counts provided in a user-uploaded CSV file.

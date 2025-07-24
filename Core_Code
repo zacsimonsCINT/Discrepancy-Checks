@@ -120,7 +120,7 @@ def create_discrepancy_report(df1, df2, source1_name, source2_name, id_column, s
         overall_discrepancy_percentage = (total_absolute_difference / total_impressions_source1) * 100
 
     print("===================================================================")
-    print(f"📊 --- Overall Discrepancy: {overall_discrepancy_percentage:.2f}% --- 📊")
+    print(f" --- Overall Discrepancy: {overall_discrepancy_percentage:.2f}% --- ")
     print(f"(Based on Total Absolute Difference / Total Impressions from {source1_name})")
     print("===================================================================\n")
     
@@ -234,10 +234,10 @@ def on_run_button_clicked(b):
             if final_report is not None and not final_report.empty:
                 report_to_download = final_report
                 download_button.disabled = False
-                print("\n✅ Report generated. Click the 'Download Report' button to save it as a CSV.")
+                print("\n Report generated. Click the 'Download Report' button to save it as a CSV.")
 
         except Exception as e:
-            print(f"\n❌ An unexpected error occurred: {e}")
+            print(f"\n An unexpected error occurred: {e}")
 
 def on_download_button_clicked(b):
     global report_to_download

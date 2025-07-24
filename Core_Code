@@ -1,0 +1,266 @@
+# --- Instructions ---
+# 1) Run this script by selecting 'Run all' above.
+# 2) Input your Campaign ID and desired date range.
+# 3) Select the ID type to query from Databricks (e.g., Placement, Creative).
+# 4) In the 'CSV ID Column' field, type the exact name of the ID column from your uploaded file.
+# 5) Upload your .CSV file.
+# 6) Click 'Run Comparison'.
+# 7) Download your report using the generated link.
+
+!pip install jinja2 -q
+
+import pandas as pd
+import numpy as np
+import ipywidgets as widgets
+from IPython.display import display, clear_output, HTML
+import io
+import base64
+
+# This script assumes it is running in a Databricks notebook,
+# which has a pre-configured 'spark' session available.
+
+# --- Global variable to hold the final report for downloading ---
+report_to_download = None
+
+# --- Widget Creation ---
+
+# Databricks filter criteria
+db_campaign_id = widgets.Text(description='Campaign ID:')
+end_date = pd.Timestamp.now()
+start_date = end_date - pd.DateOffset(years=1)
+dates = pd.date_range(start_date, end_date, freq='D')
+options = [(date.strftime(' %b %d, %Y '), date) for date in dates]
+index = (len(options)-8, len(options)-1)
+date_range_slider = widgets.SelectionRangeSlider(
+    options=options,
+    index=index,
+    description='Date Range',
+    orientation='horizontal',
+    layout={'width': '500px'}
+)
+
+# --- Widget to select the ID type from Databricks ---
+id_type_selector = widgets.ToggleButtons(
+    options={'Placement': 'placement.id', 'Creative': 'creative.id', 'Site': 'publisher.id'},
+    description='DB ID Type:',
+    button_style='',
+    tooltips=('Group by placement.id', 'Group by creative.id', 'Group by publisher.id')
+)
+
+# --- Widget to specify the CSV ID column name ---
+csv_id_column_input = widgets.Text(
+    description='CSV ID Column:',
+    value='Placement ID',
+    placeholder='Enter the exact column name'
+)
+
+# --- NEW: Widget to toggle visualizations ---
+visuals_toggle = widgets.ToggleButtons(
+    options={'On': True, 'Off': False},
+    description='Heatmap:',
+    value=True,
+    button_style='',
+    tooltips=('Show color-coded heatmap on the report table.', 'Show a plain table.')
+)
+
+
+# CSV file uploader
+csv_uploader = widgets.FileUpload(
+    accept='.csv',
+    description='Upload CSV File',
+    button_style='primary'
+)
+
+# Action buttons
+run_button = widgets.Button(
+    description='Run Comparison',
+    button_style='success',
+    icon='check'
+)
+download_button = widgets.Button(
+    description='Download Report',
+    disabled=True,
+    button_style='info',
+    icon='download'
+)
+
+# Output widgets
+download_link_placeholder = widgets.HTML(value="")
+output_area = widgets.Output()
+
+
+# --- Core Functions ---
+
+def create_discrepancy_report(df1, df2, source1_name, source2_name, id_column, show_visuals):
+    """
+    Takes two DataFrames, performs discrepancy analysis, and returns the report.
+    """
+    impressions_column = 'Impressions'
+
+    # Merge dataframes
+    merged_df = pd.merge(df1, df2, on=id_column, suffixes=(f'_{source1_name}', f'_{source2_name}'))
+
+    if merged_df.empty:
+        print(f"--- No common '{id_column}'s found between the two sources. ---")
+        return None
+
+    print(f"Found {len(merged_df)} common IDs. Calculating discrepancies...\n")
+
+    impressions1 = merged_df[f'{impressions_column}_{source1_name}']
+    impressions2 = merged_df[f'{impressions_column}_{source2_name}']
+    merged_df['Absolute Difference'] = abs(impressions1 - impressions2)
+
+    # --- Overall Discrepancy Calculation ---
+    total_absolute_difference = merged_df['Absolute Difference'].sum()
+    total_impressions_source1 = merged_df[f'{impressions_column}_{source1_name}'].sum()
+
+    if total_impressions_source1 == 0:
+        overall_discrepancy_percentage = 100.0 if total_absolute_difference > 0 else 0.0
+    else:
+        overall_discrepancy_percentage = (total_absolute_difference / total_impressions_source1) * 100
+
+    print("===================================================================")
+    print(f"📊 --- Overall Discrepancy: {overall_discrepancy_percentage:.2f}% --- 📊")
+    print(f"(Based on Total Absolute Difference / Total Impressions from {source1_name})")
+    print("===================================================================\n")
+    
+    # --- Individual Row Discrepancy ---
+    merged_df['Percentage Difference'] = np.where(
+        impressions1 == 0,
+        np.where(impressions2 == 0, 0, 100.0),
+        (merged_df['Absolute Difference'] / impressions1) * 100
+    )
+
+    report_df = merged_df.rename(columns={
+        f'{impressions_column}_{source1_name}': f'Impressions ({source1_name})',
+        f'{impressions_column}_{source2_name}': f'Impressions ({source2_name})'
+    })
+
+    final_report = report_df[[id_column, f'Impressions ({source1_name})', f'Impressions ({source2_name})', 'Absolute Difference', 'Percentage Difference']]
+    final_report_sorted = final_report.sort_values(by='Percentage Difference', ascending=False)
+    
+    print("--- Detailed Report (sorted by highest individual % discrepancy) ---")
+    
+    # Conditionally display the styled or plain table
+    if show_visuals:
+        styled_table = final_report_sorted.style.format({'Percentage Difference': "{:.2f}%"})\
+                                                 .background_gradient(cmap='Reds', subset=['Percentage Difference'])\
+                                                 .background_gradient(cmap='Oranges', subset=['Absolute Difference'])
+        display(styled_table)
+    else:
+        display(final_report_sorted)
+        
+    return final_report_sorted
+
+def clean_and_aggregate(df, id_col, imp_col):
+    """Standardizes and aggregates a DataFrame."""
+    # Clean Impressions column
+    df[imp_col] = pd.to_numeric(
+        df[imp_col].astype(str).str.replace(',', '', regex=False),
+        errors='coerce'
+    ).fillna(0)
+    
+    # Clean ID column by treating it as a string
+    df[id_col] = df[id_col].astype(str).str.strip()
+    
+    # Aggregate data by summing impressions for each unique ID
+    return df.groupby(id_col)[imp_col].sum().reset_index()
+
+def on_run_button_clicked(b):
+    global report_to_download
+    with output_area:
+        clear_output(wait=True)
+        download_button.disabled = True
+        download_link_placeholder.value = ""
+
+        # --- 1. Validate Inputs ---
+        if not all([db_campaign_id.value, date_range_slider.value, csv_id_column_input.value]):
+            print("--- Please fill in all filter details, including the CSV ID Column name. ---")
+            return
+        if not csv_uploader.value:
+            print("--- Please upload a CSV file. ---")
+            return
+
+        try:
+            # --- 2. Fetch data from Databricks ---
+            print("Querying Databricks database...")
+            
+            start_date_val, end_date_val = date_range_slider.value
+            db_id_column = id_type_selector.value
+            
+            query = f"""
+            SELECT
+                {db_id_column} as `ID`,
+                COUNT(*) as `Impressions`
+            FROM
+                dsm.measurement.vw_impressions
+            WHERE
+                campaign_id = '{db_campaign_id.value}'
+                AND to_date(exposure_ts) BETWEEN '{start_date_val.strftime('%Y-%m-%d')}' AND '{end_date_val.strftime('%Y-%m-%d')}'
+            GROUP BY
+                {db_id_column}
+            """
+            db_data = spark.sql(query).toPandas()
+            
+            if db_data.empty:
+                print(f"--- No data found in Databricks for Campaign ID '{db_campaign_id.value}' between {start_date_val.strftime('%Y-%m-%d')} and {end_date_val.strftime('%Y-%m-%d')}. ---")
+                return
+            print(f"✅ Successfully fetched {len(db_data)} rows from Databricks.")
+
+            # --- 3. Load data from CSV ---
+            csv_info = list(csv_uploader.value.values())[0]
+            csv_name = csv_info['metadata']['name']
+            csv_df = pd.read_csv(io.BytesIO(csv_info['content']))
+            print(f"✅ Successfully loaded '{csv_name}'.")
+
+            # --- 4. Clean and Aggregate Both Sources ---
+            print("🔄 Standardizing and aggregating data from both sources...")
+            
+            csv_id_column_name = csv_id_column_input.value
+            
+            if csv_id_column_name not in csv_df.columns or 'Impressions' not in csv_df.columns:
+                print(f"❌ ERROR: The uploaded CSV file is missing one of the required columns: '{csv_id_column_name}' or 'Impressions'.")
+                return
+
+            db_data.rename(columns={'ID': csv_id_column_name}, inplace=True)
+            
+            db_agg = clean_and_aggregate(db_data, csv_id_column_name, 'Impressions')
+            csv_agg = clean_and_aggregate(csv_df, csv_id_column_name, 'Impressions')
+            print("Data cleaning complete.\n")
+
+            # --- 5. Run Comparison ---
+            final_report = create_discrepancy_report(csv_agg, db_agg, "CSV", "Databricks", csv_id_column_name, visuals_toggle.value)
+
+            if final_report is not None and not final_report.empty:
+                report_to_download = final_report
+                download_button.disabled = False
+                print("\n✅ Report generated. Click the 'Download Report' button to save it as a CSV.")
+
+        except Exception as e:
+            print(f"\n❌ An unexpected error occurred: {e}")
+
+def on_download_button_clicked(b):
+    global report_to_download
+    if report_to_download is not None:
+        try:
+            csv_data = report_to_download.to_csv(index=False)
+            b64 = base64.b64encode(csv_data.encode()).decode()
+            payload = f'<a download="databricks_discrepancy_report.csv" href="data:text/csv;base64,{b64}" target="_blank">Download link generated! Click here.</a>'
+            download_link_placeholder.value = payload
+        except Exception as e:
+            download_link_placeholder.value = f"<p style='color:red;'>Error creating download link: {e}</p>"
+
+# --- Event Handling and Display ---
+run_button.on_click(on_run_button_clicked)
+download_button.on_click(on_download_button_clicked)
+
+filter_box = widgets.VBox([widgets.HTML("<b>Filter Criteria</b>"), db_campaign_id, date_range_slider, id_type_selector, csv_id_column_input])
+file_box = widgets.VBox([widgets.HTML("<b>Upload File</b>"), csv_uploader, visuals_toggle])
+
+print("Set filters and upload a CSV file to compare against the Databricks database.")
+display(
+    widgets.HBox([filter_box, file_box]),
+    widgets.HBox([run_button, download_button]),
+    output_area,
+    download_link_placeholder
+)
